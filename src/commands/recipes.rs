@@ -1,8 +1,55 @@
-use anylist_rs::{AnyListClient, Ingredient, Recipe};
+use anylist_rs::{AnyListClient, AnyListError, Ingredient, Recipe, RecipeCollection};
+use chrono::{Local, NaiveDate};
 use clap::{Arg, ArgMatches, Command};
 
 use crate::auth::read_tokens;
 use crate::error::CliError;
+
+fn display_recipe_categories(mut categories: Vec<RecipeCollection>) {
+    if categories.is_empty() {
+        println!("No recipe categories found.");
+        return;
+    }
+
+    categories.sort_by_key(|category| category.name().to_lowercase());
+    println!("\nRecipe Categories:");
+    println!("{}", "=".repeat(18));
+    println!();
+    for category in categories {
+        println!("  {} ({})", category.name(), category.id());
+    }
+    println!();
+}
+
+fn find_recipe_category<'a>(
+    categories: &'a [RecipeCollection],
+    identifier: &str,
+) -> Result<&'a RecipeCollection, AnyListError> {
+    if let Some(category) = categories
+        .iter()
+        .find(|category| category.id() == identifier)
+    {
+        return Ok(category);
+    }
+
+    let name = identifier.to_lowercase();
+    let mut matches = categories
+        .iter()
+        .filter(|category| category.name().to_lowercase() == name);
+    let category = matches.next().ok_or_else(|| {
+        AnyListError::NotFound(format!(
+            "Recipe category '{}' not found. Use 'recipe categories' to list categories.",
+            identifier
+        ))
+    })?;
+    if matches.next().is_some() {
+        return Err(AnyListError::Other(format!(
+            "Multiple recipe categories match '{}'. Use a category ID from 'recipe categories'.",
+            identifier
+        )));
+    }
+    Ok(category)
+}
 
 fn display_recipe_list(recipes: Vec<Recipe>) {
     if recipes.is_empty() {
@@ -21,7 +68,7 @@ fn display_recipe_list(recipes: Vec<Recipe>) {
     for recipe in sorted {
         let ingredient_count = recipe.ingredients().len();
         let step_count = recipe.preparation_steps().len();
-        print!("  \x1B[1m{}\x1B[0m", recipe.name());
+        print!("  \x1B[1m{}\x1B[0m ({})", recipe.name(), recipe.id());
 
         if ingredient_count > 0 || step_count > 0 {
             print!(" ({} ingredients, {} steps)", ingredient_count, step_count);
@@ -48,13 +95,30 @@ fn display_ingredient(ingredient: &Ingredient) {
     println!();
 }
 
-fn display_recipe_detail(recipe: &Recipe) {
+fn display_recipe_detail(
+    recipe: &Recipe,
+    collections: &[RecipeCollection],
+    last_prepared: Option<NaiveDate>,
+) {
     println!("\n\x1B[1m{}\x1B[0m", recipe.name());
     println!("{}", "=".repeat(recipe.name().len()));
     println!();
 
     // Display ID
     println!("ID: {}", recipe.id());
+
+    // AnyList groups recipes into collections, which serve as recipe categories.
+    let mut categories: Vec<&str> = collections
+        .iter()
+        .filter(|collection| collection.recipe_ids().iter().any(|id| id == recipe.id()))
+        .map(|collection| collection.name())
+        .collect();
+    categories.sort_by_key(|name| name.to_lowercase());
+    if categories.is_empty() {
+        println!("Categories: None");
+    } else {
+        println!("Categories: {}", categories.join(", "));
+    }
 
     // Display rating
     if let Some(rating) = recipe.rating() {
@@ -79,9 +143,17 @@ fn display_recipe_detail(recipe: &Recipe) {
     // Display times (convert from seconds to minutes)
     if let Some(prep_time) = recipe.prep_time() {
         println!("Prep Time: {} minutes", prep_time / 60);
+    } else {
+        println!("Prep Time: Not specified");
     }
     if let Some(cook_time) = recipe.cook_time() {
         println!("Cook Time: {} minutes", cook_time / 60);
+    }
+
+    if let Some(date) = last_prepared {
+        println!("Last Prepared: {} (meal plan)", date);
+    } else {
+        println!("Last Prepared: Not recorded in meal plan");
     }
 
     // Display note
@@ -118,12 +190,31 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("list")
-                .about("List all recipes")
-                .long_about("Display a list of all your recipes with ingredient and step counts"),
+                .about("List recipes, optionally filtered by category")
+                .long_about(
+                    "Display recipes with IDs, ingredient counts, and step counts. Optionally filter \
+                     by an AnyList recipe collection using its ID or case-insensitive name.",
+                )
+                .arg(
+                    Arg::new("category")
+                        .long("category")
+                        .help("Filter by category ID or case-insensitive name")
+                        .value_name("CATEGORY_NAME_OR_ID"),
+                ),
+        )
+        .subcommand(
+            Command::new("categories")
+                .about("List recipe categories with their IDs")
+                .long_about("List AnyList recipe collections as category names and IDs"),
         )
         .subcommand(
             Command::new("get")
                 .about("Display details for a specific recipe")
+                .long_about(
+                    "Display recipe details, including preparation time, categories (AnyList \
+                     collections), last prepared date (from the meal plan), ingredients, and \
+                     preparation steps.",
+                )
                 .arg(
                     Arg::new("name")
                         .help("Name or ID of the recipe to display")
@@ -138,8 +229,17 @@ pub async fn exec_command(matches: &ArgMatches) -> Result<(), CliError> {
     let client = AnyListClient::from_tokens(tokens)?;
 
     match matches.subcommand() {
-        Some(("list", _)) => {
-            let recipes = client.get_recipes().await?;
+        Some(("categories", _)) => {
+            let categories = client.get_recipe_collections().await?;
+            display_recipe_categories(categories);
+        }
+        Some(("list", sub_matches)) => {
+            let mut recipes = client.get_recipes().await?;
+            if let Some(identifier) = sub_matches.get_one::<String>("category") {
+                let categories = client.get_recipe_collections().await?;
+                let category = find_recipe_category(&categories, identifier)?;
+                recipes.retain(|recipe| category.recipe_ids().iter().any(|id| id == recipe.id()));
+            }
             display_recipe_list(recipes);
         }
         Some(("get", sub_matches)) => {
@@ -153,7 +253,18 @@ pub async fn exec_command(matches: &ArgMatches) -> Result<(), CliError> {
                 Err(_) => client.get_recipe_by_id(identifier).await?,
             };
 
-            display_recipe_detail(&recipe);
+            let collections = client.get_recipe_collections().await?;
+            let today = Local::now().date_naive();
+            // Search the full meal-plan history through today, excluding future plans.
+            let events = client
+                .get_meal_plan_events("0001-01-01", &today.to_string())
+                .await?;
+            let last_prepared = events
+                .iter()
+                .filter(|event| event.recipe_id() == Some(recipe.id()))
+                .filter_map(|event| NaiveDate::parse_from_str(event.date(), "%Y-%m-%d").ok())
+                .max();
+            display_recipe_detail(&recipe, &collections, last_prepared);
         }
         _ => {
             // Default: show all recipes

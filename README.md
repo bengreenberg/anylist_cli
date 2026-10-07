@@ -122,6 +122,13 @@ anylist meal-plan delete CALENDAR_ID EVENT_ID
 # List all recipes
 anylist recipe list
 
+# List recipe categories as Name (CATEGORY_ID)
+anylist recipe categories
+
+# List recipes in a category by name or ID
+anylist recipe list --category "Weeknight Dinners"
+anylist recipe list --category CATEGORY_ID
+
 # View a specific recipe by name or ID
 anylist recipe get "Pasta Carbonara"
 anylist recipe get RECIPE_ID
@@ -129,6 +136,21 @@ anylist recipe get RECIPE_ID
 # Default: list all recipes
 anylist recipe
 ```
+
+Recipe categories are AnyList recipe collections. Category names match
+case-insensitively; use the category ID if multiple categories share a name.
+Recipe lists show `Recipe Name (RECIPE_ID)` followed by ingredient and step counts.
+Without `--category`, `recipe list` shows all recipes.
+
+`recipe get` shows preparation time in minutes and the recipe's categories
+(AnyList recipe collections), along with the other recipe details. If no prep
+time is saved, it shows `Prep Time: Not specified`; recipes without collections
+show `Categories: None`.
+
+`Last Prepared` shows the most recent meal-plan date for the recipe on or before
+today (using your local date), in `YYYY-MM-DD` format. This is based on scheduled
+meals, not a separate cooking confirmation. Future entries are excluded; if no
+matching history exists, it shows `Last Prepared: Not recorded in meal plan`.
 
 ## Getting Help
 
