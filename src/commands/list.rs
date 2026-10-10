@@ -40,9 +40,12 @@ fn display_list_items(list: &List) {
     if !checked_items.is_empty() {
         println!("\nCompleted:");
         for item in checked_items {
-            print!("  [✓] {}", item.name());
+            print!("  [✓] {} ({})", item.name(), item.id());
             if let Some(qty) = &item.quantity() {
                 print!(" ({})", qty);
+            }
+            if let Some(cat) = &item.category() {
+                print!(" [{}]", cat);
             }
             println!();
         }
